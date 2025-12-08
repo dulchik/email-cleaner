@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -18,7 +20,10 @@ type Email struct {
 	From 		string
 	Subject 	string
 	Unsubscribe string
+	Labels		[]string
 }
+
+
 
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config) *http.Client {
@@ -111,17 +116,54 @@ func main() {
 	}
 
 	user := "me"
-	r, err := srv.Users.Messages.List(user).LabelIds("INBOX").MaxResults(50).Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve messages: %v", err)
-	}
-	if len(r.Messages) == 0 {
-		fmt.Println("No labels found.")
-		return
-	}
+	var emails []Email
+	var mu sync.Mutex
 
-	emails := []Email{}
-	for _, m := range r.Messages {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if len(emails) == 0 {
+			fmt.Fprintln(w, "Loading emails... please refresh in a moment") 
+			return
+		}
+
+    	fmt.Fprintln(w, "<html><body><h1>Inbox Emails</h1><table border='1'>")
+    	fmt.Fprintln(w, "<tr><th>From</th><th>Subject</th><th>Unsubscribe</th><th>Labels</th></tr>")
+
+    	for _, e := range emails {
+        	unsubscribeBtn := "N/A"
+        	if e.Unsubscribe != "" {
+            	unsubscribeBtn = fmt.Sprintf("<a href='%s' target='_blank'><button>Unsubscribe</button></a>", e.Unsubscribe)
+        	}
+
+        	fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", e.From, e.Subject, unsubscribeBtn, strings.Join(e.Labels, ", "))
+    	}
+
+    	fmt.Fprintln(w, "</table></body></html>")
+	})
+
+	go func() {
+	var allMessages []*gmail.Message
+	pageToken := ""
+	for {
+		req := srv.Users.Messages.List(user).LabelIds("INBOX").MaxResults(500)
+		if pageToken != "" {
+			req.PageToken(pageToken)
+		}
+		resp, err := req.Do()
+		if err != nil {
+			log.Fatalf("Unable to retrieve message: %v", err)
+		}
+		allMessages = append(allMessages, resp.Messages...)
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	fmt.Printf("Total emails in INBOX: %d\n", len(allMessages))
+
+	for _, m := range allMessages {
 		msg, err := srv.Users.Messages.Get(user, m.Id).Format("metadata").Do()
 		if err != nil {
 			log.Printf("Unable to get message %s: %v", m.Id, err)
@@ -139,21 +181,20 @@ func main() {
 				unsubscribe = h.Value
 			}
 		}
+
+		mu.Lock()
 		emails = append(emails, Email{
 			From: from,
 			Subject: subject,
 			Unsubscribe: unsubscribe,
+			Labels: msg.LabelIds,
 		})
+		mu.Unlock()
 	}
+	}()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-    	fmt.Fprintln(w, "<table border='1'><tr><th>From</th><th>Subject</th><th>Unsubscribe</th></tr>")
-		for _, e := range emails {
-        	fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>", e.From, e.Subject, e.Unsubscribe)
-    	}
-       	fmt.Fprintln(w, "</table>")
-   	})
 
-    log.Println("Listening on http://localhost:8080")
-    log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Server running at http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+
 }
