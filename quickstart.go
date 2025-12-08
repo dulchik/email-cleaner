@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sort"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -23,6 +24,11 @@ type Email struct {
 	Labels		[]string
 }
 
+type SenderGroup struct {
+	Sender string
+	Emails []Email
+	Count  int
+}
 
 
 // Retrieve a token, saves the token, then returns the generated client.
@@ -95,7 +101,7 @@ func saveToken(path string, token *oauth2.Token) {
 }
 
 func main() {
-	ctx := context.Background()
+		ctx := context.Background()
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		log.Fatalf("Unable to read client secret file: %v", err)
@@ -118,6 +124,8 @@ func main() {
 	user := "me"
 	var emails []Email
 	var mu sync.Mutex
+	senderGroups := make(map[string]*SenderGroup)
+
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -127,20 +135,53 @@ func main() {
 			fmt.Fprintln(w, "Loading emails... please refresh in a moment") 
 			return
 		}
+	
+		// Convert map to slice and sort
+		var sortedGroups []SenderGroup
+		for _, g := range senderGroups {
+			sortedGroups = append(sortedGroups, *g)
+		}
 
-    	fmt.Fprintln(w, "<html><body><h1>Inbox Emails</h1><table border='1'>")
-    	fmt.Fprintln(w, "<tr><th>From</th><th>Subject</th><th>Unsubscribe</th><th>Labels</th></tr>")
+		// Sort descending by count
+		sort.Slice(sortedGroups, func(i, j int) bool {
+			return sortedGroups[i].Count > sortedGroups[j].Count
+		})
 
-    	for _, e := range emails {
-        	unsubscribeBtn := "N/A"
-        	if e.Unsubscribe != "" {
-            	unsubscribeBtn = fmt.Sprintf("<a href='%s' target='_blank'><button>Unsubscribe</button></a>", e.Unsubscribe)
-        	}
+		fmt.Fprintln(w, "<html><body><h1>Inbox Emails by Sender</h1>")
 
-        	fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", e.From, e.Subject, unsubscribeBtn, strings.Join(e.Labels, ", "))
-    	}
+		// Include simple JS for toggling
+		fmt.Fprintln(w, `<script>
+		function toggleTable(id) {
+  		var x = document.getElementById(id);
+  		if (x.style.display === "none") {
+    		x.style.display = "table";
+  		} else {
+    		x.style.display = "none";
+  		}
+		}
+		</script>`)
 
-    	fmt.Fprintln(w, "</table></body></html>")
+		for i, g := range sortedGroups {
+			tableID := fmt.Sprintf("table-%d", i) // unique ID per sender
+			fmt.Fprintf(w, `<h2 onclick="toggleTable('%s')" style="cursor:pointer;">%s (%d emails) &#9660;</h2>`,
+				tableID, g.Sender, g.Count)
+
+			fmt.Fprintf(w, `<table border='1' id='%s' style='display:none;'>
+			<tr><th>Subject</th><th>Unsubscribe</th><th>Labels</th></tr>`, tableID)
+
+			for _, e := range g.Emails {
+				unsubBtn := "N/A"
+				if e.Unsubscribe != "" {
+					unsubBtn = fmt.Sprintf("<a href='%s' target='_blank'><button>Unsubscribe</button></a>", e.Unsubscribe)
+				}
+				fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
+					e.Subject, unsubBtn, strings.Join(e.Labels, ", "))
+			}
+
+			fmt.Fprintln(w, "</table>")
+		}
+
+		fmt.Fprintln(w, "</body></html>")
 	})
 
 	go func() {
@@ -189,8 +230,31 @@ func main() {
 			Unsubscribe: unsubscribe,
 			Labels: msg.LabelIds,
 		})
+
+		// Incremental batching
+		if _, ok := senderGroups[from]; !ok {
+			senderGroups[from] = &SenderGroup{
+				Sender: from,
+				Emails: []Email{},
+			}
+		}
+
+		senderGroups[from].Emails = append(senderGroups[from].Emails, Email{
+			From: from,
+			Subject: subject,
+			Unsubscribe: unsubscribe,
+			Labels: msg.LabelIds,
+		})
+		senderGroups[from].Count = len(senderGroups[from].Emails)
 		mu.Unlock()
 	}
+		// Batch emails by sender
+		mu.Lock()
+		senderMap := make(map[string]*SenderGroup)
+		for _, e := range emails {
+						senderMap[e.From].Emails = append(senderMap[e.From].Emails, e)
+		}
+		mu.Unlock()
 	}()
 
 
