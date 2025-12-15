@@ -19,3 +19,5 @@ email-cleaner/
 └── README.md
 
 ```
+# How it works
+

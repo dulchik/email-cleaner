@@ -1,4 +1,4 @@
-module email-cleaner
+module github.com/dulchik/email-cleaner
 
 go 1.24.5
 
